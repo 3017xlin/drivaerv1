@@ -22,6 +22,7 @@ from tqdm import tqdm
 from dataset.loaders import (load_cases_pinned, load_coef_norm, load_manifest)
 from evaluation.denormalize import to_linear_zscore_volume
 from models import DrivAer3DModel
+from models.bigbird import build_bigbird_index
 from training.checkpoint import delete_checkpoint, list_checkpoints
 from training.ddp import cleanup_ddp, init_ddp, is_distributed
 
@@ -59,39 +60,19 @@ def _build_curve_batch(case_pts: list[dict],
 
         n_q_vol = int(items[0]['transient2_n_vol'])
         tgt_vol = torch.stack([it['point_y_volume'].index_select(
-            0, it['transient2_query_idx'][:n_q_vol].long()) for it in items]
+            0, it['transient2_vol_choice'].long()) for it in items]
                               ).to(device)
         tgt_surf = torch.stack([it['point_y_surface'].index_select(
-            0, (it['transient2_query_idx'][n_q_vol:].long()
-                - it['N_vol_keep']))
-            for it in items]).to(device)
+            0, it['transient2_surf_choice'].long()) for it in items]
+                              ).to(device)
 
-        bkey_dummy = None     # curve uses baked transient1 only; ViT path
-        # cannot use FlexAttention without keys, so fall back to the dense
-        # gather code path with key_idx == all 1+2 order neighbors.
-        # (Implementation choice: re-use leaf_neighbor_idx as key_idx by
-        # padding to a fixed 158-key window.)
         Lc = stacked['leaf_centroid_norm'].shape[1]
-        kn = stacked['leaf_neighbor_idx']                              # (B, L, N_pad)
-        # Take first 158 of each row (padded already)
-        K = 158
-        if kn.shape[-1] < K:
-            pad = torch.full((kn.shape[0], kn.shape[1], K - kn.shape[-1]),
-                             -1, dtype=kn.dtype, device=kn.device)
-            kn = torch.cat([kn, pad], dim=-1)
-        else:
-            kn = kn[..., :K]
-        invalid_mask = (kn == -1)
-        kn = kn.clamp(min=0)
-        # Add register tokens 65536..65551 to every row
-        L_with_reg = Lc + 16
-        reg = torch.arange(Lc, L_with_reg, device=kn.device)[None, None].expand(
-            kn.shape[0], kn.shape[1], 16)
-        kn = torch.cat([kn[:, :, :K - 16], reg], dim=-1)
-        attn_bias = torch.zeros(kn.shape[0], kn.shape[1], K,
-                                device=kn.device, dtype=torch.float32)
-        attn_bias[:, :, :K - 16].masked_fill_(
-            invalid_mask[:, :, :K - 16], float('-inf'))
+        bb_list = []
+        for i in range(len(items)):
+            ln = items[i]['leaf_neighbor_idx'].numpy()
+            bb_np = build_bigbird_index(ln, L=Lc, seed=42)
+            bb_list.append(torch.from_numpy(bb_np))
+        kn = torch.stack(bb_list, dim=0).to(device)
 
         stacked.update({
             'query_pos_norm': qpos,
@@ -102,7 +83,6 @@ def _build_curve_batch(case_pts: list[dict],
             'query_target_volume': tgt_vol,
             'query_target_surface': tgt_surf,
             'bigbird_key_idx': kn.to(torch.int32),
-            'bigbird_attn_bias': attn_bias,
             'n_query_vol': n_q_vol,
         })
         out.append(stacked)

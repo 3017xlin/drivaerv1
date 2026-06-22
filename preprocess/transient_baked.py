@@ -13,7 +13,6 @@ def bake_transient1(rng: np.random.Generator,
                     point_curv_mean_zscored: np.ndarray,
                     point_curv_gauss_zscored: np.ndarray,
                     leaf_centroid_norm: np.ndarray,
-                    n_vol_keep: int,
                     encoder_k: int = 32
                     ) -> np.ndarray:
     """Return transient1 [L, 32, 10] bf16-ready fp32 array."""
@@ -23,7 +22,9 @@ def bake_transient1(rng: np.random.Generator,
            - leaf_centroid_norm[:, None, :])
     sdf = point_sdf_zscored[sampled_idx]
     sdf_g = point_sdf_grad[sampled_idx]
-    surf_flag = (sampled_idx >= n_vol_keep).astype(np.float32)
+    starts = offsets[:-1].astype(np.int64)
+    within_leaf = sampled_idx - starts[:, None]
+    surf_flag = (within_leaf >= leaf_vol_count[:, None]).astype(np.float32)
     cm = point_curv_mean_zscored[sampled_idx]
     cg = point_curv_gauss_zscored[sampled_idx]
     out = np.concatenate([
@@ -54,8 +55,8 @@ def sample_k_per_leaf(rng: np.random.Generator,
 
 
 def bake_transient2(rng: np.random.Generator,
-                    n_vol_keep: int,
-                    n_surf_keep: int,
+                    vol_reorder_idx: np.ndarray,
+                    surf_reorder_idx: np.ndarray,
                     leaf_centroid_norm: np.ndarray,
                     leaf_neighbor_idx: np.ndarray,
                     leaf_id_per_point: np.ndarray,
@@ -67,18 +68,20 @@ def bake_transient2(rng: np.random.Generator,
                     idw_k: int = 8
                     ) -> dict[str, np.ndarray]:
     """Return baked transient2 fields."""
+    n_vol_keep = vol_reorder_idx.shape[0]
+    n_surf_keep = surf_reorder_idx.shape[0]
     n_query_surf = n_query - n_query_vol
-    vol_local = rng.choice(n_vol_keep, size=n_query_vol, replace=False)
+    vol_choice = rng.choice(n_vol_keep, size=n_query_vol, replace=False)
     if surface_area_alpha == 0.0:
-        surf_local = rng.choice(n_surf_keep, size=n_query_surf, replace=False)
+        surf_choice = rng.choice(n_surf_keep, size=n_query_surf, replace=False)
     else:
         w = surface_areas.astype(np.float64) ** float(surface_area_alpha)
         w /= w.sum()
-        surf_local = rng.choice(n_surf_keep, size=n_query_surf,
-                                replace=False, p=w)
+        surf_choice = rng.choice(n_surf_keep, size=n_query_surf,
+                                 replace=False, p=w)
     query_idx = np.concatenate([
-        vol_local.astype(np.int32),
-        (n_vol_keep + surf_local).astype(np.int32),
+        vol_reorder_idx[vol_choice].astype(np.int32),
+        surf_reorder_idx[surf_choice].astype(np.int32),
     ])
     idw_idx, idw_w = compute_idw_numpy(
         query_idx=query_idx,
@@ -93,6 +96,8 @@ def bake_transient2(rng: np.random.Generator,
         'idw_idx': idw_idx,
         'idw_w': idw_w.astype(np.float32),
         'n_query_vol': np.int32(n_query_vol),
+        'vol_choice': vol_choice.astype(np.int32),
+        'surf_choice': surf_choice.astype(np.int32),
     }
 
 

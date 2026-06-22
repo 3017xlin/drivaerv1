@@ -27,6 +27,7 @@ def build_transient1(pt: dict, epoch: int, encoder_k: int = 32) -> np.ndarray:
     case_id = int(pt.get('_case_id', 0))
     rng = make_rng(per_case_epoch_seed(case_id, epoch))
     offsets = _tensor_to_np(pt['leaf_member_offsets']).astype(np.int64)
+    leaf_vol_count = _tensor_to_np(pt['leaf_vol_count']).astype(np.int64)
     sampled_idx = sample_k_per_leaf(rng, offsets, encoder_k=encoder_k)
     point_pos_norm = _tensor_to_np(pt['point_pos_norm'])
     point_sdf = _tensor_to_np(pt['point_sdf'])
@@ -34,10 +35,11 @@ def build_transient1(pt: dict, epoch: int, encoder_k: int = 32) -> np.ndarray:
     point_curv_mean = _tensor_to_np(pt['point_curvature_mean'])
     point_curv_gauss = _tensor_to_np(pt['point_curvature_gauss'])
     leaf_centroid_norm = _tensor_to_np(pt['leaf_centroid_norm'])
-    n_vol = int(pt['N_vol_keep'])
     rel = (point_pos_norm[sampled_idx]
-           - leaf_centroid_norm[:, None, :])                              # (L, 32, 3)
-    surf_flag = (sampled_idx >= n_vol).astype(np.float32)
+           - leaf_centroid_norm[:, None, :])
+    starts = offsets[:-1]
+    within_leaf = sampled_idx - starts[:, None]
+    surf_flag = (within_leaf >= leaf_vol_count[:, None]).astype(np.float32)
     sdf = point_sdf[sampled_idx]
     sdf_g = point_sdf_grad[sampled_idx]
     cm = point_curv_mean[sampled_idx]
@@ -64,21 +66,23 @@ def build_transient2(pt: dict, epoch: int,
     """
     case_id = int(pt.get('_case_id', 0))
     rng = make_rng(per_case_epoch_seed(case_id, epoch) ^ 0xA5A5_A5A5)
-    n_vol = int(pt['N_vol_keep'])
-    n_surf = int(pt['N_surf_keep'])
+    vol_reorder_idx = _tensor_to_np(pt['vol_reorder_idx']).astype(np.int64)
+    surf_reorder_idx = _tensor_to_np(pt['surf_reorder_idx']).astype(np.int64)
+    n_vol = vol_reorder_idx.shape[0]
+    n_surf = surf_reorder_idx.shape[0]
     surf_a = _tensor_to_np(pt['surface_areas']).astype(np.float64)
     if surface_area_alpha == 0.0:
-        surf_local = rng.choice(n_surf, size=n_query - n_query_vol,
-                                 replace=False)
+        surf_choice = rng.choice(n_surf, size=n_query - n_query_vol,
+                                  replace=False)
     else:
         w = surf_a ** float(surface_area_alpha)
         w /= w.sum()
-        surf_local = rng.choice(n_surf, size=n_query - n_query_vol,
-                                 replace=False, p=w)
-    vol_local = rng.choice(n_vol, size=n_query_vol, replace=False)
+        surf_choice = rng.choice(n_surf, size=n_query - n_query_vol,
+                                  replace=False, p=w)
+    vol_choice = rng.choice(n_vol, size=n_query_vol, replace=False)
     query_idx = np.concatenate([
-        vol_local.astype(np.int64),
-        (n_vol + surf_local).astype(np.int64),
+        vol_reorder_idx[vol_choice],
+        surf_reorder_idx[surf_choice],
     ])
     point_pos_norm = _tensor_to_np(pt['point_pos_norm'])
     point_sdf = _tensor_to_np(pt['point_sdf'])
@@ -90,8 +94,8 @@ def build_transient2(pt: dict, epoch: int,
     qpos = point_pos_norm[query_idx].astype(np.float32)
     qsdf = point_sdf[query_idx].astype(np.float32)
     qsdf_g = point_sdf_grad[query_idx].astype(np.float32)
-    tgt_vol = point_y_volume[vol_local].astype(np.float32)
-    tgt_surf = point_y_surface[surf_local].astype(np.float32)
+    tgt_vol = point_y_volume[vol_choice].astype(np.float32)
+    tgt_surf = point_y_surface[surf_choice].astype(np.float32)
     query_leaf_id = leaf_id_per_point[query_idx].astype(np.int32)
 
     out = {
@@ -104,8 +108,8 @@ def build_transient2(pt: dict, epoch: int,
     }
     if 'nut_log_zscored' in pt:
         nut = _tensor_to_np(pt['nut_log_zscored'])
-        out['nut_log_zscored'] = nut[vol_local].astype(np.float32)
+        out['nut_log_zscored'] = nut[vol_choice].astype(np.float32)
     if 'vort_log_zscored' in pt:
         vort = _tensor_to_np(pt['vort_log_zscored'])
-        out['vort_log_zscored'] = vort[vol_local].astype(np.float32)
+        out['vort_log_zscored'] = vort[vol_choice].astype(np.float32)
     return out
