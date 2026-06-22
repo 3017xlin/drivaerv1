@@ -98,6 +98,8 @@ def stage_a_worker(case_id: int, step1_dir: str, scratch_dir: str,
     stl_v = step1_pt['stl_vertices'].numpy().astype(np.float32)
     stl_f = step1_pt['stl_faces'].numpy().astype(np.int32)
     ref = step1_pt['reference']
+    del step1_pt
+
     n_vol_full = vol_pos.shape[0]
     n_surf_full = surf_pos.shape[0]
     n_full = n_vol_full + n_surf_full

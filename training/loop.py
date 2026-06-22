@@ -78,7 +78,7 @@ def _move_batch_to_gpu(batch: dict[str, torch.Tensor], device
     return out
 
 
-def train(cfg: dict, run_dir: str) -> None:
+def train(cfg: dict, run_dir: str, _owns_ddp: bool = True) -> None:
     cache_dir = cfg['data']['cache_dir']
     set_global_seed(int(cfg['seed']))
     rank, world, local = init_ddp()
@@ -170,7 +170,7 @@ def train(cfg: dict, run_dir: str) -> None:
                       total=steps_per_epoch)
         for batch_cpu in it:
             batch = _move_batch_to_gpu(batch_cpu, device)
-            with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+            with torch.amp.autocast('cuda', dtype=torch.bfloat16):
                 pred_vol, pred_surf = compiled(batch)
                 target_vol = build_train_target_vol(batch, log_nut, log_vort)
                 target_surf = build_train_target_surf(batch)
@@ -221,4 +221,5 @@ def train(cfg: dict, run_dir: str) -> None:
         monitor.save_png(osp.join(run_dir, 'resource_log.png'))
     if is_distributed():
         dist.barrier()
-    cleanup_ddp()
+    if _owns_ddp:
+        cleanup_ddp()

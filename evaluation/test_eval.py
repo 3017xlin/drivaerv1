@@ -66,7 +66,7 @@ def _decode_chunk(model: DrivAer3DModel, enc_feat: torch.Tensor,
     idw_idx_p = idw_idx[perm].unsqueeze(0)
     idw_w_p = idw_w[perm].unsqueeze(0).to(torch.bfloat16)
     n_q_vol = int(vol_pos.shape[0])
-    with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+    with torch.amp.autocast('cuda', dtype=torch.bfloat16):
         pred_vol, pred_surf = model.decode_chunk(
             enc_feat, vit_feat, qpos, qsdf, qsdf_g, idw_idx_p, idw_w_p,
             n_q_vol)
@@ -121,7 +121,7 @@ def _eval_one_case(model: DrivAer3DModel, cache_dir: str, case_id: int,
     attn_bias[0, :, :K_local].masked_fill_(invalid_mask, float('-inf'))
     batch['bigbird_attn_bias'] = attn_bias.to(device, non_blocking=True)
 
-    with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+    with torch.amp.autocast('cuda', dtype=torch.bfloat16):
         enc_feat, vit_feat = model.encode(batch)
 
     pred_vol_full_z = torch.zeros(n_vol_full, 8, device='cpu',

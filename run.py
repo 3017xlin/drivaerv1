@@ -88,14 +88,14 @@ def main():
     run_dir = osp.join(cfg['output_base'], name)
     os.makedirs(run_dir, exist_ok=True)
 
-    rank = int(os.environ.get('RANK', 0))
+    rank, _, _ = init_ddp()
     timing: dict[str, float] = {}
 
     # ---- Stage 1: Train ----
     if rank == 0:
         print(f'=== TRAIN === {name}', flush=True)
     t0 = time.time()
-    train(cfg, run_dir)
+    train(cfg, run_dir, _owns_ddp=False)
     timing['train_total_sec'] = time.time() - t0
     if rank == 0:
         print(f'=== TRAIN DONE === {timing["train_total_sec"]:.0f}s', flush=True)
@@ -106,7 +106,8 @@ def main():
             print('=== CURVE ===', flush=True)
         t1 = time.time()
         delete_ckpt = args.delete_checkpoints and not args.keep_checkpoints
-        run_curve(cfg, run_dir, delete_checkpoints=delete_ckpt)
+        run_curve(cfg, run_dir, delete_checkpoints=delete_ckpt,
+                  _owns_ddp=False)
         timing['curve_total_sec'] = time.time() - t1
         if rank == 0:
             print(f'=== CURVE DONE === {timing["curve_total_sec"]:.0f}s', flush=True)

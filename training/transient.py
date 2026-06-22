@@ -70,15 +70,15 @@ def build_transient2(pt: dict, epoch: int,
     surf_reorder_idx = _tensor_to_np(pt['surf_reorder_idx']).astype(np.int64)
     n_vol = vol_reorder_idx.shape[0]
     n_surf = surf_reorder_idx.shape[0]
+    n_query_vol = min(n_query_vol, n_vol)
+    n_query_surf = min(n_query - n_query_vol, n_surf)
     surf_a = _tensor_to_np(pt['surface_areas']).astype(np.float64)
     if surface_area_alpha == 0.0:
-        surf_choice = rng.choice(n_surf, size=n_query - n_query_vol,
-                                  replace=False)
+        surf_choice = rng.choice(n_surf, size=n_query_surf, replace=False)
     else:
         w = surf_a ** float(surface_area_alpha)
         w /= w.sum()
-        surf_choice = rng.choice(n_surf, size=n_query - n_query_vol,
-                                  replace=False, p=w)
+        surf_choice = rng.choice(n_surf, size=n_query_surf, replace=False, p=w)
     vol_choice = rng.choice(n_vol, size=n_query_vol, replace=False)
     query_idx = np.concatenate([
         vol_reorder_idx[vol_choice],

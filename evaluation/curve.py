@@ -89,8 +89,8 @@ def _build_curve_batch(case_pts: list[dict],
     return out
 
 
-def run_curve(cfg: dict, run_dir: str, delete_checkpoints: bool = False
-              ) -> None:
+def run_curve(cfg: dict, run_dir: str, delete_checkpoints: bool = False,
+              _owns_ddp: bool = True) -> None:
     cache_dir = cfg['data']['cache_dir']
     rank, world, local = init_ddp()
     device = (torch.device('cuda', local) if torch.cuda.is_available()
@@ -137,7 +137,7 @@ def run_curve(cfg: dict, run_dir: str, delete_checkpoints: bool = False
         v_vol, v_surf, n_v = 0.0, 0.0, 0
         with torch.no_grad():
             for batch in _build_curve_batch(my_te_pts, device, B):
-                with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+                with torch.amp.autocast('cuda', dtype=torch.bfloat16):
                     pred_vol, pred_surf = model(batch)
                 pred_vol_lin = to_linear_zscore_volume(
                     pred_vol.float(), coef_norm, log_nut, log_vort)
@@ -150,7 +150,7 @@ def run_curve(cfg: dict, run_dir: str, delete_checkpoints: bool = False
                 te_surf += mse_surf * bs
                 n_te += bs
             for batch in _build_curve_batch(my_val_pts, device, B):
-                with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+                with torch.amp.autocast('cuda', dtype=torch.bfloat16):
                     pred_vol, pred_surf = model(batch)
                 pred_vol_lin = to_linear_zscore_volume(
                     pred_vol.float(), coef_norm, log_nut, log_vort)
@@ -189,7 +189,8 @@ def run_curve(cfg: dict, run_dir: str, delete_checkpoints: bool = False
                     - (cfg['training'].get('swa_window', 100)
                        if cfg['training'].get('swa_window', 'auto') != 'auto'
                        else max(50, cfg['training']['num_epochs'] // 4)))
-    cleanup_ddp()
+    if _owns_ddp:
+        cleanup_ddp()
 
 
 def _plot_curve(curve: dict[str, dict[str, float]], out_png: str,
