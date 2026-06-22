@@ -59,10 +59,11 @@ TABLE2_TEMPLATE = r"""
 & $p_s$ & $\tau_x$ & $\tau_y$ & $\tau_z$ & $p_v$ & $u_x$ & $u_y$ & $u_z$ & $\nu_t$ \\
 \midrule
 DoMINO              & 15.05 & 21.24 & 30.20 & 33.59 & 21.93 & 23.97 & 50.25 & 45.67 & 21.75 \\
+AB-UPT              & 3.76  & 5.35  & 3.65  & 3.63  & 6.29  & 4.43  & 3.04  & 2.61  & -     \\
 \midrule
 \textsc{Ours}       & {P_S} & {TX} & {TY} & {TZ} & {P_V} & {U_X} & {U_Y} & {U_Z} & {NUT} \\
 \bottomrule
-\multicolumn{10}{p{1.2\textwidth}}{\vspace{2pt}\footnotesize $^*$ \textit{Note on DoMINO Comparison:} DoMINO employs a different evaluation protocol. First, it calculates the relative L2 error for vector fields by decomposing them into independent spatial components ($x, y, z$) rather than using the overall vector magnitude. Second, DoMINO evaluates turbulent viscosity ($\nu_t$). Lastly, DoMINO utilizes a specific out-of-distribution (OOD) data split based on drag force ranges, whereas other models utilize a uniform random split. We report our component-wise metrics here to provide a direct structural comparison.}
+\multicolumn{10}{p{1.2\textwidth}}{\vspace{2pt}\footnotesize $^*$ \textit{Note on Component-wise Comparison:} DoMINO employs a specific out-of-distribution (OOD) data split based on drag force ranges and calculates the relative L2 error for vector fields by decomposing them into independent spatial components ($x, y, z$). For a fair comparison, the results for AB-UPT are taken from their officially reported benchmarks trained on the exact same DoMINO data split and evaluated using component-wise metrics. Missing values (-) indicate the metric (e.g., turbulent viscosity $\nu_t$) was not reported by that baseline.}
 \end{tabular}%
 }
 \end{table*}
