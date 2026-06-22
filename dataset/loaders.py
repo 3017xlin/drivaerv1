@@ -39,6 +39,34 @@ def _derive_leaf_id_per_point(offsets: torch.Tensor) -> torch.Tensor:
                                    counts)
 
 
+def _derive_vol_surf_reorder_idx(
+        offsets: torch.Tensor, leaf_vol_count: torch.Tensor,
+        n_keep: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """Derive vol_reorder_idx / surf_reorder_idx from offsets + leaf_vol_count."""
+    is_vol = torch.zeros(n_keep, dtype=torch.bool)
+    off_np = offsets.numpy()
+    lvc_np = leaf_vol_count.numpy()
+    L = lvc_np.shape[0]
+    for i in range(L):
+        lo = int(off_np[i])
+        is_vol[lo:lo + int(lvc_np[i])] = True
+    vol_idx = torch.nonzero(is_vol, as_tuple=False).squeeze(-1).to(torch.int64)
+    surf_idx = torch.nonzero(~is_vol, as_tuple=False).squeeze(-1).to(torch.int64)
+    return vol_idx, surf_idx
+
+
+def _derive_fields(pt: dict[str, Any]) -> None:
+    """Derive leaf_id_per_point, vol_reorder_idx, surf_reorder_idx in-place."""
+    offsets = pt['leaf_member_offsets']
+    if 'leaf_id_per_point' not in pt:
+        pt['leaf_id_per_point'] = _derive_leaf_id_per_point(offsets).pin_memory()
+    if 'vol_reorder_idx' not in pt and 'N_keep' in pt:
+        vol_idx, surf_idx = _derive_vol_surf_reorder_idx(
+            offsets, pt['leaf_vol_count'], int(pt['N_keep']))
+        pt['vol_reorder_idx'] = vol_idx.pin_memory()
+        pt['surf_reorder_idx'] = surf_idx.pin_memory()
+
+
 def _pin_dict(pt: dict[str, Any]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for k, v in pt.items():
@@ -113,9 +141,7 @@ def load_cases_pinned(cache_dir: str, case_ids: list[int],
     out: dict[int, dict[str, Any]] = {}
     for cid in case_ids:
         pt = _pin_dict(raw[cid])
-        if 'leaf_id_per_point' not in pt:
-            pt['leaf_id_per_point'] = _derive_leaf_id_per_point(
-                pt['leaf_member_offsets']).pin_memory()
+        _derive_fields(pt)
         out[cid] = pt
     del raw
     return out
@@ -144,9 +170,7 @@ def load_cases_dataloader(cache_dir: str, case_ids: list[int],
     for batch in it:
         for cid, pt_dict in batch:
             out[cid] = _pin_dict(pt_dict)
-            if 'leaf_id_per_point' not in out[cid]:
-                out[cid]['leaf_id_per_point'] = _derive_leaf_id_per_point(
-                    out[cid]['leaf_member_offsets']).pin_memory()
+            _derive_fields(out[cid])
     return out
 
 
