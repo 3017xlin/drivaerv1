@@ -1,0 +1,92 @@
+# =====================================================================
+# DrivAerML 3D surrogate (v4) default hyperparameters.
+#
+# All architectural constants that the preprocess step needs (L,
+# encoder_k, N_pad, rope_scale_per_axis) live in coef_norm.pt, written
+# by preprocess.py. The frozen train/val/test/train_eval split lives in
+# <cache_dir>/manifest.json.
+# =====================================================================
+
+# === Data ===
+data:
+  cache_dir: cache_16
+
+# === Training schedule ===
+training:
+  num_epochs: 400
+  batch_size: 1                  # per-rank; 1 / 2 / 4 supported
+  num_workers: 30                # IO + transient prep (per rank)
+  lr: 1.0e-4                     # baseline; effective = lr * sqrt(W*B)
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  swa_window: auto               # auto -> max(50, num_epochs // 4)
+  compile_mode: reduce-overhead  # CUDA graphs
+  prefetch_queue_size: 4         # CPU producer queue depth per rank
+
+# === Sampling ===
+sampling:
+  N_query: 500000                # total decoder queries per case per step
+  surface_query_ratio: 0.2       # 80 / 20 hard split
+  surface_area_alpha: 1.0        # surface ∝ area^alpha
+
+# === Log training switches (default off) ===
+log_training:
+  nut: false
+  vorticity: false
+
+# === Architecture (fixed; coding agent must not silently change) ===
+model:
+  L: 65536                       # 2^16 leaves
+  encoder_k: 32                  # points per leaf for encoder K/V
+  latent_dim: 192                # D
+  num_layers: 12
+  num_heads: 3
+  head_dim: 64                   # 192 / 3
+  ffn_hidden: 768                # 4 * D
+  register_tokens: 16
+  bigbird_local: 110
+  bigbird_register: 16
+  bigbird_random: 32
+  decoder_idw_k: 8
+  decoder_fourier_freqs: 10
+  decoder_pos_hidden: 256
+  decoder_pos_out: 512
+  rope_base: 100.0
+  rope_dims: [22, 22, 20]        # x/y/z, sum = 64 = head_dim
+
+# === Regularization ===
+regularization:
+  ffn_dropout: 0.1
+  decoder_dropout: 0.0
+  attn_dropout: 0.0
+  drop_path_rate: 0.0            # CUDA graph compatibility
+
+# === Checkpoint ===
+checkpoint:
+  every_epochs_pre_swa: 10
+  every_epochs_swa: 5
+  keep_optimizer_state: false    # this codebase does NOT support resume
+
+# === Evaluation ===
+evaluation:
+  curve_batch_size: 4            # B for curve forward (independent of train B)
+  test_chunk_size: 4000000       # decoder chunk size during test inference
+  vol_slice_y_tolerance: 0.015   # |y| < δ for y=0 slice
+  vol_slice_colorbar_percentiles: [0.5, 99.5]
+
+# === Reporting ===
+reporting:
+  baselines_table1:              # for tables.tex Ours-vs-baselines logic
+    Transolver:    {p_s: 4.81, tau: 8.95, p_v: 7.74, u: 6.78, omega: 38.4}
+    "Transolver++": {p_s: 5.26, tau: null, p_v: null, u: 7.16, omega: 40.3}
+    "Transolver-3": {p_s: 3.71, tau: 5.85, p_v: 5.72, u: 4.14, omega: null,
+                     cd_r2: 0.972, cl_r2: 0.985}
+    AB-UPT:        {p_s: 3.82, tau: 7.29, p_v: 6.08, u: 5.93, omega: 35.1,
+                    cd_r2: 0.963, cl_r2: 0.975}
+  baselines_table2:
+    DoMINO: {p_s: 15.05, tau_x: 21.24, tau_y: 30.20, tau_z: 33.59,
+             p_v: 21.93, u_x: 23.97, u_y: 50.25, u_z: 45.67, nut: 21.75}
+
+# === Misc ===
+seed: 42                         # global; also used for train_eval choice
+output_base: runs
