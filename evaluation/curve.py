@@ -19,7 +19,8 @@ import torch.distributed as dist
 import torch.nn.functional as F
 from tqdm import tqdm
 
-from dataset.loaders import (load_cases_pinned, load_coef_norm, load_manifest)
+from dataset.loaders import (load_cases_dataloader, load_cases_pinned,
+                             load_coef_norm, load_manifest)
 from evaluation.denormalize import to_linear_zscore_volume
 from models import DrivAer3DModel
 from models.bigbird import build_bigbird_index
@@ -90,7 +91,8 @@ def _build_curve_batch(case_pts: list[dict],
 
 
 def run_curve(cfg: dict, run_dir: str, delete_checkpoints: bool = False,
-              _owns_ddp: bool = True) -> None:
+              _owns_ddp: bool = True,
+              retained_pt: dict[int, dict] | None = None) -> None:
     cache_dir = cfg['data']['cache_dir']
     rank, world, local = init_ddp()
     device = (torch.device('cuda', local) if torch.cuda.is_available()
@@ -100,13 +102,18 @@ def run_curve(cfg: dict, run_dir: str, delete_checkpoints: bool = False,
     train_eval_ids = manifest['train_eval_ids']
     val_ids = manifest['val_ids']
     case_ids = train_eval_ids + val_ids
-    # Load all 68 cases pinned (each ~890MB → ~60GB total)
-    all_pt = load_cases_pinned(cache_dir, case_ids,
-                               num_workers=int(cfg['training']['num_workers']),
-                               with_log_sidecar=(False, False), rank=rank)
-    # For curve, we also need 'point_y_volume' / 'point_y_surface' fields
-    # (they're in the PT for val; for train_eval they're train-schema PTs
-    # which also have these fields).
+    n_workers = int(cfg['training']['num_workers'])
+    if retained_pt is not None:
+        all_pt = dict(retained_pt)
+        my_val_ids = sorted(val_ids[rank::world])
+        val_pt = load_cases_dataloader(cache_dir, my_val_ids,
+                                       num_workers=n_workers, rank=rank)
+        all_pt.update(val_pt)
+        del val_pt
+    else:
+        all_pt = load_cases_pinned(cache_dir, case_ids,
+                                   num_workers=n_workers,
+                                   with_log_sidecar=(False, False), rank=rank)
 
     # Build the model and prepare for loading state_dicts
     model = DrivAer3DModel(cfg).to(device)

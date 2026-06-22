@@ -7,6 +7,7 @@ after evaluation to save disk. Use --skip_curve / --skip_test / --skip_viz
 / --skip_report to skip stages.
 """
 import argparse
+import gc
 import os
 import os.path as osp
 import time
@@ -14,6 +15,7 @@ import time
 import torch
 import yaml
 
+from dataset.loaders import load_manifest
 from training.loop import train
 from evaluation.curve import run_curve
 from evaluation.test_eval import run_test_eval
@@ -95,10 +97,25 @@ def main():
     if rank == 0:
         print(f'=== TRAIN === {name}', flush=True)
     t0 = time.time()
-    train(cfg, run_dir, _owns_ddp=False)
+    all_pt_data = train(cfg, run_dir, _owns_ddp=False)
     timing['train_total_sec'] = time.time() - t0
     if rank == 0:
         print(f'=== TRAIN DONE === {timing["train_total_sec"]:.0f}s', flush=True)
+
+    # Retain only train_eval cases for curve; free the rest
+    retained_pt: dict | None = None
+    if all_pt_data and not args.skip_curve:
+        cache_dir = cfg['data']['cache_dir']
+        manifest = load_manifest(cache_dir)
+        te_set = set(manifest['train_eval_ids'])
+        retained_pt = {cid: pt for cid, pt in all_pt_data.items()
+                       if cid in te_set}
+        del all_pt_data
+        gc.collect()
+        torch.cuda.empty_cache()
+    else:
+        del all_pt_data
+        gc.collect()
 
     # ---- Stage 2: Curve ----
     if not args.skip_curve:
@@ -107,8 +124,11 @@ def main():
         t1 = time.time()
         delete_ckpt = args.delete_checkpoints and not args.keep_checkpoints
         run_curve(cfg, run_dir, delete_checkpoints=delete_ckpt,
-                  _owns_ddp=False)
+                  _owns_ddp=False, retained_pt=retained_pt)
         timing['curve_total_sec'] = time.time() - t1
+        del retained_pt
+        gc.collect()
+        torch.cuda.empty_cache()
         if rank == 0:
             print(f'=== CURVE DONE === {timing["curve_total_sec"]:.0f}s', flush=True)
 

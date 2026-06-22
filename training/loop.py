@@ -78,7 +78,8 @@ def _move_batch_to_gpu(batch: dict[str, torch.Tensor], device
     return out
 
 
-def train(cfg: dict, run_dir: str, _owns_ddp: bool = True) -> None:
+def train(cfg: dict, run_dir: str, _owns_ddp: bool = True
+          ) -> dict[int, dict[str, Any]] | None:
     cache_dir = cfg['data']['cache_dir']
     set_global_seed(int(cfg['seed']))
     rank, world, local = init_ddp()
@@ -223,3 +224,4 @@ def train(cfg: dict, run_dir: str, _owns_ddp: bool = True) -> None:
         dist.barrier()
     if _owns_ddp:
         cleanup_ddp()
+    return all_pt_data
