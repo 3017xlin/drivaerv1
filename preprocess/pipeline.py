@@ -546,7 +546,7 @@ def stage_c_worker(summary: dict[str, Any], coef_norm: dict[str, Any],
             rng_baked, payload['offsets'], payload['leaf_vol_count'],
             point_pos_norm, point_sdf, payload['enc_sdf_grad_ord'],
             point_curv_mean, point_curv_gauss,
-            leaf_centroid_norm, n_vol_keep,
+            leaf_centroid_norm,
         )
         pt['transient1'] = torch.from_numpy(t1).to(torch.bfloat16)
     else:
@@ -562,20 +562,35 @@ def stage_c_worker(summary: dict[str, Any], coef_norm: dict[str, Any],
         pt['N_surf_keep'] = int(n_surf_keep)
         pt['N_keep'] = int(payload['n_keep'])
 
+        # Precompute vol/surf reorder indices from interleaved layout
+        _offsets = payload['offsets']
+        _lvc = payload['leaf_vol_count']
+        is_vol_in_reordered = np.zeros(payload['n_keep'], dtype=bool)
+        for _l in range(L_LEAVES):
+            lo = int(_offsets[_l])
+            is_vol_in_reordered[lo:lo + int(_lvc[_l])] = True
+        vol_reorder_idx = np.where(is_vol_in_reordered)[0].astype(np.int64)
+        surf_reorder_idx = np.where(~is_vol_in_reordered)[0].astype(np.int64)
+        pt['vol_reorder_idx'] = torch.from_numpy(vol_reorder_idx)
+        pt['surf_reorder_idx'] = torch.from_numpy(surf_reorder_idx)
+
+        leaf_id_per_point = np.repeat(
+            np.arange(L_LEAVES, dtype=np.int32),
+            np.diff(_offsets).astype(np.int64))
+        pt['leaf_id_per_point'] = torch.from_numpy(leaf_id_per_point)
+
         # Train_eval and val: bake transient1/2
         if case_id in train_eval_ids or case_id in val_ids:
-            rng_baked = np.random.default_rng(42 + case_id)        # per-case stable
-            leaf_id_per_point = np.repeat(
-                np.arange(L_LEAVES, dtype=np.int32),
-                np.diff(payload['offsets']).astype(np.int64))
+            rng_baked = np.random.default_rng(42 + case_id)
             t1 = bake_transient1(
-                rng_baked, payload['offsets'], payload['leaf_vol_count'],
+                rng_baked, _offsets, _lvc,
                 point_pos_norm, point_sdf, payload['enc_sdf_grad_ord'],
                 point_curv_mean, point_curv_gauss,
-                leaf_centroid_norm, n_vol_keep,
+                leaf_centroid_norm,
             )
             t2 = bake_transient2(
-                rng_baked, n_vol_keep, n_surf_keep,
+                rng_baked,
+                vol_reorder_idx, surf_reorder_idx,
                 leaf_centroid_norm, neighbor_idx, leaf_id_per_point,
                 point_pos_norm, payload['surf_a_ord'].astype(np.float32),
                 n_query=n_query, n_query_vol=n_query_vol,
@@ -587,6 +602,8 @@ def stage_c_worker(summary: dict[str, Any], coef_norm: dict[str, Any],
             pt['transient2_idw_w'] = torch.from_numpy(t2['idw_w']).to(
                 torch.bfloat16)
             pt['transient2_n_vol'] = int(t2['n_query_vol'])
+            pt['transient2_vol_choice'] = torch.from_numpy(t2['vol_choice'])
+            pt['transient2_surf_choice'] = torch.from_numpy(t2['surf_choice'])
 
     # Write the main PT file
     if is_test:
