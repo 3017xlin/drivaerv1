@@ -51,11 +51,9 @@ class RotaryEmbedding3D(nn.Module):
         self._scale_y = float(rope_scale_per_axis.view(-1)[1])
         self._scale_z = float(rope_scale_per_axis.view(-1)[2])
 
-    def forward(self, leaf_centroid_norm: torch.Tensor,
-                rope_scale_per_axis: torch.Tensor
+    def forward(self, leaf_centroid_norm: torch.Tensor
                 ) -> tuple[torch.Tensor, torch.Tensor]:
         """leaf_centroid_norm: (B, L, 3) fp32 in [-1,1].
-        rope_scale_per_axis: (B, 3) fp32.
         Returns cos, sin each of shape (B, L+R, head_dim).
         """
         B, L, _ = leaf_centroid_norm.shape

@@ -46,18 +46,19 @@ def _stack(batch_items: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
 def prepare_one_case(case_pt: dict[str, Any], case_id: int, epoch: int,
                      encoder_k: int,
                      n_query: int, n_query_vol: int,
-                     surface_area_alpha: float, idw_k: int,
+                     surface_area_alpha: float,
                      bigbird_local: int, bigbird_register: int,
                      bigbird_random: int) -> dict[str, Any]:
     """Build per-case CPU tensors for one (case, epoch, step) tuple."""
-    # Attach case_id so build_transient* can derive RNG
     case_pt['_case_id'] = case_id
-    t1 = build_transient1(case_pt, epoch=epoch, encoder_k=encoder_k)
-    t2 = build_transient2(case_pt, epoch=epoch,
-                          n_query=n_query, n_query_vol=n_query_vol,
-                          surface_area_alpha=surface_area_alpha,
-                          idw_k=idw_k)
-    # BigBird key_idx (per-epoch random tokens)
+    with ThreadPoolExecutor(2) as pool:
+        fut1 = pool.submit(build_transient1, case_pt, epoch=epoch,
+                           encoder_k=encoder_k)
+        fut2 = pool.submit(build_transient2, case_pt, epoch=epoch,
+                           n_query=n_query, n_query_vol=n_query_vol,
+                           surface_area_alpha=surface_area_alpha)
+        t1 = fut1.result()
+        t2 = fut2.result()
     seed = per_case_epoch_seed(case_id, epoch) ^ 0xBB17_BB17
     leaf_neighbor_idx = case_pt['leaf_neighbor_idx'].numpy()
     key_idx = build_bigbird_index(
@@ -67,7 +68,6 @@ def prepare_one_case(case_pt: dict[str, Any], case_id: int, epoch: int,
         n_random=bigbird_random, seed=seed,
     )
     out: dict[str, Any] = {
-        # Per-leaf (static, copy from pinned to a stack-able tensor)
         'leaf_centroid_norm': case_pt['leaf_centroid_norm'],
         'leaf_stats': case_pt['leaf_stats'],
         'leaf_sdf': case_pt['leaf_sdf'],
@@ -80,15 +80,12 @@ def prepare_one_case(case_pt: dict[str, Any], case_id: int, epoch: int,
         'query_sdf': torch.from_numpy(t2['query_sdf']).to(torch.bfloat16),
         'query_sdf_grad': torch.from_numpy(t2['query_sdf_grad']).to(
             torch.bfloat16),
-        'idw_indices': torch.from_numpy(t2['idw_indices']),
-        'idw_weights': torch.from_numpy(t2['idw_weights']).to(
-            torch.bfloat16),
+        'query_leaf_id': torch.from_numpy(t2['query_leaf_id']),
         'query_target_volume': torch.from_numpy(
             t2['query_target_volume']).to(torch.bfloat16),
         'query_target_surface': torch.from_numpy(
             t2['query_target_surface']).to(torch.bfloat16),
         'bigbird_key_idx': torch.from_numpy(key_idx),
-        'n_query_vol': int(t2['n_query_vol']),
     }
     if 'nut_log_zscored' in t2:
         out['nut_log_zscored'] = torch.from_numpy(
@@ -96,8 +93,6 @@ def prepare_one_case(case_pt: dict[str, Any], case_id: int, epoch: int,
     if 'vort_log_zscored' in t2:
         out['vort_log_zscored'] = torch.from_numpy(
             t2['vort_log_zscored']).to(torch.bfloat16)
-    # rope scale broadcast
-    out['rope_scale_per_axis'] = case_pt.get('_rope_scale_per_axis')
     return out
 
 
@@ -111,22 +106,19 @@ class AsyncPrefetcher:
 
     def __init__(self, case_id_list: list[int], all_pt_data: dict,
                  batch_size: int, epoch: int,
-                 rope_scale_per_axis: torch.Tensor,
                  *, encoder_k: int, n_query: int, n_query_vol: int,
-                 surface_area_alpha: float, idw_k: int,
+                 surface_area_alpha: float,
                  bigbird_local: int, bigbird_register: int,
                  bigbird_random: int,
-                 num_workers: int = 30, queue_size: int = 4):
+                 num_workers: int = 30, queue_size: int = 1):
         self.case_id_list = list(case_id_list)
         self.all_pt_data = all_pt_data
         self.B = batch_size
         self.epoch = epoch
-        self.rope_scale = rope_scale_per_axis      # (3,) fp32
         self.encoder_k = encoder_k
         self.n_query = n_query
         self.n_query_vol = n_query_vol
         self.surface_area_alpha = surface_area_alpha
-        self.idw_k = idw_k
         self.bigbird_local = bigbird_local
         self.bigbird_register = bigbird_register
         self.bigbird_random = bigbird_random
@@ -136,20 +128,12 @@ class AsyncPrefetcher:
         self._bg.start()
 
     def _build_one(self, case_id: int) -> dict[str, Any]:
-        # Note: in-process call (we already paid the ProcessPool cost
-        # below). The ProcessPool worker actually calls prepare_one_case
-        # with a pickled snapshot of the pinned tensors — that's slow,
-        # so for the canonical implementation we keep transient prep
-        # in-thread but parallelize across cases within a batch via the
-        # executor. For B=1 this is just an in-thread call.
         pt = self.all_pt_data[case_id]
-        pt['_rope_scale_per_axis'] = self.rope_scale
         return prepare_one_case(
             pt, case_id, self.epoch,
             encoder_k=self.encoder_k,
             n_query=self.n_query, n_query_vol=self.n_query_vol,
             surface_area_alpha=self.surface_area_alpha,
-            idw_k=self.idw_k,
             bigbird_local=self.bigbird_local,
             bigbird_register=self.bigbird_register,
             bigbird_random=self.bigbird_random,

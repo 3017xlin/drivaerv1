@@ -21,61 +21,30 @@ def build_bigbird_index(leaf_neighbor_idx: np.ndarray,
     rng = np.random.default_rng(seed)
     K = n_local + n_register + n_random
     out = np.empty((L, K), dtype=np.int32)
-    register_ids = np.arange(L, L + n_register, dtype=np.int32)
 
     valid_mask = leaf_neighbor_idx != -1
     valid_counts = valid_mask.sum(axis=1)
-
-    local_part = np.full((L, n_local), -1, dtype=np.int32)
-    need_extra = np.zeros(L, dtype=bool)
-    for q in range(L):
-        vc = int(valid_counts[q])
-        if vc >= n_local:
-            local_part[q] = leaf_neighbor_idx[q, :n_local]
-        else:
-            local_part[q, :vc] = leaf_neighbor_idx[q, valid_mask[q]]
-            need_extra[q] = True
-
-    extra_ids = np.where(need_extra)[0]
-    for q in extra_ids:
-        vc = int(valid_counts[q])
-        need = n_local - vc
-        valid = leaf_neighbor_idx[q, valid_mask[q]]
-        pool = np.setdiff1d(np.arange(L, dtype=np.int32), valid,
-                            assume_unique=False)
-        extra = rng.choice(pool, size=need, replace=False)
-        local_part[q, vc:] = extra
-
+    local_part = leaf_neighbor_idx[:, :n_local].copy()
+    short = valid_counts < n_local
+    if short.any():
+        for q in np.where(short)[0]:
+            vc = int(valid_counts[q])
+            local_part[q, :vc] = leaf_neighbor_idx[q, valid_mask[q]][:vc]
+            pool = np.setdiff1d(np.arange(L, dtype=np.int32), local_part[q, :vc])
+            local_part[q, vc:] = rng.choice(pool, n_local - vc, replace=False)
     out[:, :n_local] = local_part
-    out[:, n_local:n_local + n_register] = register_ids[None, :]
 
-    oversample = n_random + 32
-    rand_cand = rng.integers(0, L, size=(L, oversample), dtype=np.int32)
+    out[:, n_local:n_local + n_register] = np.arange(L, L + n_register, dtype=np.int32)
+
+    rand = rng.integers(0, L, size=(L, n_random + 32), dtype=np.int32)
     local_sorted = np.sort(local_part, axis=1)
-    insert_pos = np.searchsorted(local_sorted, rand_cand)
-    insert_pos = np.clip(insert_pos, 0, n_local - 1)
-    in_local = local_sorted[np.arange(L)[:, None], insert_pos] == rand_cand
-    priority = in_local.astype(np.int32)
-    order = np.argsort(priority, axis=1, kind='stable')
-    selected = np.take_along_axis(rand_cand, order[:, :n_random], axis=1)
-    out[:, n_local + n_register:] = selected
+    pos = np.searchsorted(local_sorted, rand)
+    pos = np.clip(pos, 0, n_local - 1)
+    hit = np.take_along_axis(local_sorted, pos, 1) == rand
+    rand_clean = np.where(hit, L, rand)
+    rand_clean.sort(axis=1)
+    out[:, n_local + n_register:] = rand_clean[:, :n_random]
 
-    deficient = np.where((~in_local).sum(axis=1) < n_random)[0]
-    for q in deficient:
-        local_set_q = set(local_part[q].tolist())
-        filled = 0
-        for c in range(oversample):
-            v = int(rand_cand[q, order[q, c]])
-            if v not in local_set_q:
-                out[q, n_local + n_register + filled] = v
-                filled += 1
-                if filled >= n_random:
-                    break
-        while filled < n_random:
-            v = int(rng.integers(0, L))
-            if v not in local_set_q:
-                out[q, n_local + n_register + filled] = v
-                filled += 1
     return out
 
 

@@ -8,6 +8,7 @@ import torch.nn as nn
 
 from .decoder import Decoder
 from .encoder import EncoderCrossAttention, build_leaf_aggregate
+from .idw import gpu_idw
 from .vit import ViT
 
 
@@ -48,6 +49,7 @@ class DrivAer3DModel(nn.Module):
         n_query = int(sampling.get('N_query', 500_000))
         self.n_query_vol = int(n_query * (
             1.0 - float(sampling.get('surface_query_ratio', 0.2))))
+        self._idw_k = int(m['decoder_idw_k'])
 
     # ------------------------------------------------------------------
     # Forward (training / curve)
@@ -55,13 +57,22 @@ class DrivAer3DModel(nn.Module):
 
     def forward(self, batch: dict[str, torch.Tensor]
                 ) -> tuple[torch.Tensor, torch.Tensor]:
+        if 'idw_indices' not in batch:
+            idw_idx, idw_w = gpu_idw(
+                batch['query_pos_norm'],
+                batch['leaf_centroid_norm'],
+                batch['leaf_neighbor_idx'],
+                batch['query_leaf_id'],
+                idw_k=self._idw_k)
+            batch['idw_indices'] = idw_idx
+            batch['idw_weights'] = idw_w
+
         leaf_aggr = build_leaf_aggregate(batch)
-        leaf_token = self.encoder(leaf_aggr, batch['transient1'])           # (B, L, D)
+        leaf_token = self.encoder(leaf_aggr, batch['transient1'])
         vit_feat = self.vit(leaf_token,
                             batch['leaf_centroid_norm'],
-                            batch['rope_scale_per_axis'],
                             batch['bigbird_key_idx'],
-                            attn_bias=batch.get('bigbird_attn_bias'))       # (B, L, D)
+                            attn_bias=batch.get('bigbird_attn_bias'))
         enc_feat = leaf_token
         pred_vol, pred_surf = self.decoder(
             enc_feat, vit_feat,
@@ -84,7 +95,6 @@ class DrivAer3DModel(nn.Module):
         leaf_token = self.encoder(leaf_aggr, batch['transient1'])
         vit_feat = self.vit(leaf_token,
                             batch['leaf_centroid_norm'],
-                            batch['rope_scale_per_axis'],
                             batch['bigbird_key_idx'],
                             attn_bias=batch.get('bigbird_attn_bias'))
         return leaf_token, vit_feat
