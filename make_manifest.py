@@ -23,6 +23,8 @@ def main():
         'train_eval_ids': build_train_eval_ids(seed=args.seed),
         'hidden_val_ids': HIDDEN_VAL_IDS,
     }
+    import os
+    os.makedirs(args.cache_dir, exist_ok=True)
     out = osp.join(args.cache_dir, 'manifest.json')
     with open(out, 'w') as f:
         json.dump(manifest, f, indent=2)
