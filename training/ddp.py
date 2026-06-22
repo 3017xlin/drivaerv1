@@ -34,31 +34,18 @@ def cleanup_ddp() -> None:
         dist.destroy_process_group()
 
 
-def build_padded_shard(case_ids: list[int], rank: int, world: int,
-                       batch_size: int, epoch: int,
+def build_padded_shard(my_ids: list[int], batch_size: int, epoch: int,
                        seed_offset: int = 0) -> list[int]:
-    """Per-rank shard, padded so every rank does the same number of steps.
+    """Rank-local shard: shuffle this rank's own cases, pad to batch multiple.
 
-    Returns a list of case ids assigned to this rank for this epoch,
-    of length ``ceil(len(case_ids) / (world * B)) * B``.
+    Returns a list of case ids of length ``ceil(len(my_ids) / B) * B``.
     """
-    perm_rng = np.random.default_rng(int(epoch) + seed_offset)
-    shuffled = list(case_ids)
-    perm_rng.shuffle(shuffled)
-    total = len(shuffled)
-    per_step = world * batch_size
-    steps = (total + per_step - 1) // per_step
-    padded_total = steps * per_step
-    pad = padded_total - total
-    if pad > 0:
-        shuffled = shuffled + shuffled[:pad]
-    # rank i gets steps[i::world]? No — easier: split into ``steps`` chunks
-    # of ``per_step`` and let rank pick its window from each chunk.
-    out: list[int] = []
-    for s in range(steps):
-        chunk = shuffled[s * per_step: (s + 1) * per_step]
-        out.extend(chunk[rank * batch_size: (rank + 1) * batch_size])
-    return out
+    rng = np.random.default_rng(int(epoch) + seed_offset)
+    shuffled = list(my_ids)
+    rng.shuffle(shuffled)
+    steps = (len(shuffled) + batch_size - 1) // batch_size
+    padded = shuffled + shuffled[:steps * batch_size - len(shuffled)]
+    return padded
 
 
 def broadcast_list_int(lst: list[int], src: int = 0) -> list[int]:

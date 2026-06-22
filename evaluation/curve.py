@@ -23,11 +23,10 @@ from dataset.loaders import (load_cases_pinned, load_coef_norm, load_manifest)
 from evaluation.denormalize import to_linear_zscore_volume
 from models import DrivAer3DModel
 from training.checkpoint import delete_checkpoint, list_checkpoints
-from training.ddp import (build_padded_shard, cleanup_ddp, init_ddp,
-                          is_distributed)
+from training.ddp import cleanup_ddp, init_ddp, is_distributed
 
 
-def _build_curve_batch(case_pts: list[dict], rope_scale: torch.Tensor,
+def _build_curve_batch(case_pts: list[dict],
                        device: torch.device, B: int
                        ) -> list[dict[str, torch.Tensor]]:
     """Group cases into stacked batches of size B (the last may be smaller).
@@ -105,8 +104,6 @@ def _build_curve_batch(case_pts: list[dict], rope_scale: torch.Tensor,
             'bigbird_key_idx': kn.to(torch.int32),
             'bigbird_attn_bias': attn_bias,
             'n_query_vol': n_q_vol,
-            'rope_scale_per_axis': rope_scale.unsqueeze(0).expand(
-                len(items), -1).to(device),
         })
         out.append(stacked)
     return out
@@ -120,8 +117,6 @@ def run_curve(cfg: dict, run_dir: str, delete_checkpoints: bool = False
               else torch.device('cpu'))
     manifest = load_manifest(cache_dir)
     coef_norm = load_coef_norm(cache_dir)
-    rope_scale = coef_norm['rope_scale_per_axis'].to(torch.float32)
-
     train_eval_ids = manifest['train_eval_ids']
     val_ids = manifest['val_ids']
     case_ids = train_eval_ids + val_ids
@@ -135,7 +130,7 @@ def run_curve(cfg: dict, run_dir: str, delete_checkpoints: bool = False
 
     # Build the model and prepare for loading state_dicts
     model = DrivAer3DModel(cfg).to(device)
-    model.vit.rope.set_rope_scale(rope_scale)
+    model.vit.rope.set_rope_scale(coef_norm['rope_scale_per_axis'].to(torch.float32))
     ckpts = list_checkpoints(osp.join(run_dir, 'checkpoints'))
     if rank == 0:
         print(f'[curve] {len(ckpts)} checkpoints to evaluate', flush=True)
@@ -161,7 +156,7 @@ def run_curve(cfg: dict, run_dir: str, delete_checkpoints: bool = False
         te_vol, te_surf, n_te = 0.0, 0.0, 0
         v_vol, v_surf, n_v = 0.0, 0.0, 0
         with torch.no_grad():
-            for batch in _build_curve_batch(my_te_pts, rope_scale, device, B):
+            for batch in _build_curve_batch(my_te_pts, device, B):
                 with torch.cuda.amp.autocast(dtype=torch.bfloat16):
                     pred_vol, pred_surf = model(batch)
                 pred_vol_lin = to_linear_zscore_volume(
@@ -174,7 +169,7 @@ def run_curve(cfg: dict, run_dir: str, delete_checkpoints: bool = False
                 te_vol += mse_vol * bs
                 te_surf += mse_surf * bs
                 n_te += bs
-            for batch in _build_curve_batch(my_val_pts, rope_scale, device, B):
+            for batch in _build_curve_batch(my_val_pts, device, B):
                 with torch.cuda.amp.autocast(dtype=torch.bfloat16):
                     pred_vol, pred_surf = model(batch)
                 pred_vol_lin = to_linear_zscore_volume(

@@ -12,7 +12,7 @@ from typing import Any
 import numpy as np
 import torch
 
-from preprocess.transient_baked import (compute_idw_numpy, sample_k_per_leaf)
+from preprocess.transient_baked import sample_k_per_leaf
 from utils.seed import per_case_epoch_seed, make_rng
 
 
@@ -56,12 +56,11 @@ def build_transient1(pt: dict, epoch: int, encoder_k: int = 32) -> np.ndarray:
 def build_transient2(pt: dict, epoch: int,
                      n_query: int = 500_000,
                      n_query_vol: int = 400_000,
-                     surface_area_alpha: float = 1.0,
-                     idw_k: int = 8) -> dict[str, np.ndarray]:
+                     surface_area_alpha: float = 1.0) -> dict[str, np.ndarray]:
     """Sample N_query queries (80/20 hard, area-weighted surface), gather
-    targets and IDW.
+    targets. IDW is computed on GPU in model.forward().
 
-    Returns dict with all required transient2 arrays as numpy.
+    Returns dict with query arrays as numpy (no idw_indices/idw_weights).
     """
     case_id = int(pt.get('_case_id', 0))
     rng = make_rng(per_case_epoch_seed(case_id, epoch) ^ 0xA5A5_A5A5)
@@ -86,24 +85,14 @@ def build_transient2(pt: dict, epoch: int,
     point_sdf_grad = _tensor_to_np(pt['point_sdf_grad'])
     point_y_volume = _tensor_to_np(pt['point_y_volume'])
     point_y_surface = _tensor_to_np(pt['point_y_surface'])
-    leaf_centroid_norm = _tensor_to_np(pt['leaf_centroid_norm'])
-    leaf_neighbor_idx = _tensor_to_np(pt['leaf_neighbor_idx'])
     leaf_id_per_point = _tensor_to_np(pt['leaf_id_per_point'])
 
     qpos = point_pos_norm[query_idx].astype(np.float32)
     qsdf = point_sdf[query_idx].astype(np.float32)
     qsdf_g = point_sdf_grad[query_idx].astype(np.float32)
-    tgt_vol = point_y_volume[vol_local].astype(np.float32)                # (N_q_vol, 8)
-    tgt_surf = point_y_surface[surf_local].astype(np.float32)              # (N_q_surf, 4)
-
-    idw_idx, idw_w = compute_idw_numpy(
-        query_idx=query_idx.astype(np.int32),
-        leaf_id_per_point=leaf_id_per_point.astype(np.int32),
-        point_pos_norm=point_pos_norm,
-        leaf_centroid_norm=leaf_centroid_norm,
-        leaf_neighbor_idx=leaf_neighbor_idx,
-        idw_k=idw_k,
-    )
+    tgt_vol = point_y_volume[vol_local].astype(np.float32)
+    tgt_surf = point_y_surface[surf_local].astype(np.float32)
+    query_leaf_id = leaf_id_per_point[query_idx].astype(np.int32)
 
     out = {
         'query_pos_norm': qpos,
@@ -111,15 +100,12 @@ def build_transient2(pt: dict, epoch: int,
         'query_sdf_grad': qsdf_g,
         'query_target_volume': tgt_vol,
         'query_target_surface': tgt_surf,
-        'idw_indices': idw_idx.astype(np.int32),
-        'idw_weights': idw_w.astype(np.float32),
-        'n_query_vol': np.int32(n_query_vol),
+        'query_leaf_id': query_leaf_id,
     }
-    # Log sidecar gather (already z-scored; just gather over vol_local)
     if 'nut_log_zscored' in pt:
         nut = _tensor_to_np(pt['nut_log_zscored'])
-        out['nut_log_zscored'] = nut[vol_local].astype(np.float32)         # (N_q_vol,)
+        out['nut_log_zscored'] = nut[vol_local].astype(np.float32)
     if 'vort_log_zscored' in pt:
         vort = _tensor_to_np(pt['vort_log_zscored'])
-        out['vort_log_zscored'] = vort[vol_local].astype(np.float32)        # (N_q_vol, 3)
+        out['vort_log_zscored'] = vort[vol_local].astype(np.float32)
     return out

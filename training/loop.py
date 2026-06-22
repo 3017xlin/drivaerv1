@@ -75,9 +75,6 @@ def _move_batch_to_gpu(batch: dict[str, torch.Tensor], device
             out[k] = v.to(device, non_blocking=True)
         else:
             out[k] = v
-    # Broadcast rope_scale_per_axis to (B, 3) if it was stored as (3,)
-    if out['rope_scale_per_axis'].ndim == 1:
-        out['rope_scale_per_axis'] = out['rope_scale_per_axis'].unsqueeze(0)
     return out
 
 
@@ -94,22 +91,23 @@ def train(cfg: dict, run_dir: str) -> None:
 
     manifest = load_manifest(cache_dir)
     coef_norm = load_coef_norm(cache_dir)
-    rope_scale = coef_norm['rope_scale_per_axis'].to(torch.float32)
 
     log_nut = bool(cfg['log_training']['nut'])
     log_vort = bool(cfg['log_training']['vorticity'])
 
     train_ids = manifest['train_ids']
+    my_train_ids = sorted(train_ids[rank::world])
     if rank == 0:
         print(f'[train] world={world}, B={cfg["training"]["batch_size"]}, '
               f'log_nut={log_nut}, log_vort={log_vort}', flush=True)
     all_pt_data = load_cases_pinned(
-        cache_dir, train_ids,
+        cache_dir, my_train_ids,
         num_workers=int(cfg['training']['num_workers']),
         with_log_sidecar=(log_nut, log_vort), rank=rank,
     )
     if rank == 0:
-        print(f'[train] pinned {len(all_pt_data)} train cases', flush=True)
+        print(f'[train] pinned {len(all_pt_data)} train cases (rank-local)',
+              flush=True)
         monitor.mark('load')
 
     model = DrivAer3DModel(cfg).to(device)
@@ -117,16 +115,14 @@ def train(cfg: dict, run_dir: str) -> None:
         model = DistributedDataParallel(model, device_ids=[local])
 
     B = int(cfg['training']['batch_size'])
-    N = len(train_ids)
-    cases_per_step = world * B
-    steps_per_epoch = (N + cases_per_step - 1) // cases_per_step
+    N = len(my_train_ids)
+    steps_per_epoch = (N + B - 1) // B
     cfg['training']['steps_per_epoch_est'] = steps_per_epoch
 
     opt, sched = _build_optimizer_and_scheduler(model, cfg, world, B)
 
-    coef_norm_rope = coef_norm['rope_scale_per_axis'].to(torch.float32)
     inner = model.module if hasattr(model, 'module') else model
-    inner.vit.rope.set_rope_scale(coef_norm_rope)
+    inner.vit.rope.set_rope_scale(coef_norm['rope_scale_per_axis'].to(torch.float32))
 
     compile_mode = cfg['training']['compile_mode']
     try:
@@ -151,15 +147,13 @@ def train(cfg: dict, run_dir: str) -> None:
     if rank == 0:
         monitor.mark('train')
     for epoch in range(num_epochs):
-        shard = build_padded_shard(train_ids, rank, world, B, epoch,
+        shard = build_padded_shard(my_train_ids, B, epoch,
                                    seed_offset=int(cfg['seed']))
         prefetcher = AsyncPrefetcher(
             shard, all_pt_data, batch_size=B, epoch=epoch,
-            rope_scale_per_axis=rope_scale,
             encoder_k=int(cfg['model']['encoder_k']),
             n_query=n_query, n_query_vol=n_query_vol,
             surface_area_alpha=surface_area_alpha,
-            idw_k=int(cfg['model']['decoder_idw_k']),
             bigbird_local=int(cfg['model']['bigbird_local']),
             bigbird_register=int(cfg['model']['bigbird_register']),
             bigbird_random=int(cfg['model']['bigbird_random']),

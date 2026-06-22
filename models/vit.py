@@ -175,13 +175,11 @@ class ViT(nn.Module):
 
     def forward(self, leaf_token: torch.Tensor,
                 leaf_centroid_norm: torch.Tensor,
-                rope_scale_per_axis: torch.Tensor,
                 key_idx: torch.Tensor,
                 attn_bias: torch.Tensor | None = None) -> torch.Tensor:
         """
         leaf_token: (B, L, dim) bf16 — output of encoder cross-attention
         leaf_centroid_norm: (B, L, 3) fp32 — for RoPE
-        rope_scale_per_axis: (B, 3) fp32
         key_idx: (B, L, n_keys) int32 — BigBird key positions per query
         attn_bias: (B, L, n_keys) float — -inf for invalid key positions
 
@@ -191,18 +189,23 @@ class ViT(nn.Module):
         R = self.register_tokens
         reg = self.register[None].expand(B, R, dim).to(leaf_token.dtype)
         x = torch.cat([leaf_token, reg], dim=1)                            # (B, L+R, dim)
-        cos, sin = self.rope(leaf_centroid_norm, rope_scale_per_axis)
+        cos, sin = self.rope(leaf_centroid_norm)
         cos = cos.to(leaf_token.dtype)
         sin = sin.to(leaf_token.dtype)
 
-        flex_mask = None
         if _FLEX_AVAILABLE:
             try:
                 from .bigbird import build_flex_block_mask
                 H = self.blocks[0].attn.num_heads
                 flex_mask = build_flex_block_mask(key_idx, B, H, L + R)
-            except Exception:
-                pass
+            except Exception as e:
+                raise RuntimeError(
+                    f"FlexAttention failed to compile: {e}. "
+                    f"Gathered attention will OOM on A100 40GB. "
+                    f"Requires PyTorch >= 2.5."
+                ) from e
+        else:
+            raise RuntimeError("FlexAttention not available. Requires PyTorch >= 2.5.")
 
         skips: list[torch.Tensor] = []
         half = self.num_layers // 2

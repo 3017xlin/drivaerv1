@@ -26,34 +26,7 @@ from evaluation.denormalize import denormalize_surface, denormalize_volume
 from evaluation.metrics import (cd_cl_from_force, integrate_force,
                                 relative_l2_scalar, relative_l2_vector)
 from models import DrivAer3DModel
-from preprocess.transient_baked import compute_idw_numpy
-
-
-def _gpu_idw(query_pos_norm: torch.Tensor,
-             leaf_centroid_norm: torch.Tensor,
-             leaf_neighbor_idx: torch.Tensor,
-             leaf_assignment: torch.Tensor,
-             idw_k: int = 8
-             ) -> tuple[torch.Tensor, torch.Tensor]:
-    """GPU IDW=k via torch.topk over each query's 1+2 order neighbors.
-
-    query_pos_norm:       (N_q, 3) fp32 on GPU
-    leaf_centroid_norm:   (L, 3) fp32 on GPU
-    leaf_neighbor_idx:    (L, N_pad) int32 on GPU (-1 padded)
-    leaf_assignment:      (N_q,) int32 on GPU (leaf id for each query)
-    """
-    cands = leaf_neighbor_idx[leaf_assignment.long()]                       # (N_q, N_pad)
-    valid = cands != -1
-    safe = cands.clamp(min=0).long()
-    cand_c = leaf_centroid_norm[safe]                                       # (N_q, N_pad, 3)
-    diff = query_pos_norm[:, None, :] - cand_c
-    d = diff.pow(2).sum(-1).sqrt()
-    d = torch.where(valid, d, torch.full_like(d, float('inf')))
-    top_d, top = torch.topk(d, k=idw_k, dim=1, largest=False)
-    idw_idx = torch.gather(cands, 1, top).to(torch.int32)
-    w = 1.0 / (top_d + 1e-8)
-    w = w / w.sum(dim=1, keepdim=True)
-    return idw_idx, w.to(torch.float32)
+from models.idw import gpu_idw
 
 
 def _decode_chunk(model: DrivAer3DModel, enc_feat: torch.Tensor,
@@ -75,8 +48,8 @@ def _decode_chunk(model: DrivAer3DModel, enc_feat: torch.Tensor,
                                                             non_blocking=True)
     leaf_neighbor_idx = test_pt['leaf_neighbor_idx'].to(device,
                                                           non_blocking=True)
-    idw_idx, idw_w = _gpu_idw(point_pos_norm, leaf_centroid_norm,
-                              leaf_neighbor_idx, leaf_assignment, idw_k)
+    idw_idx, idw_w = gpu_idw(point_pos_norm, leaf_centroid_norm,
+                             leaf_neighbor_idx, leaf_assignment, idw_k)
     # Split volume / surface by global index: query indices < N_vol_full are vol.
     n_vol_full = int(test_pt['N_vol_full'])
     is_vol = (torch.arange(lo, hi, device=device) < n_vol_full)
@@ -147,8 +120,6 @@ def _eval_one_case(model: DrivAer3DModel, cache_dir: str, case_id: int,
     attn_bias = torch.zeros(1, L, K_local + 16, dtype=torch.float32)
     attn_bias[0, :, :K_local].masked_fill_(invalid_mask, float('-inf'))
     batch['bigbird_attn_bias'] = attn_bias.to(device, non_blocking=True)
-    batch['rope_scale_per_axis'] = coef_norm['rope_scale_per_axis'].to(
-        device).unsqueeze(0)
 
     with torch.cuda.amp.autocast(dtype=torch.bfloat16):
         enc_feat, vit_feat = model.encode(batch)
