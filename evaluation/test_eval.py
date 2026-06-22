@@ -199,7 +199,7 @@ def run_test_eval(cfg: dict, run_dir: str,
     model = DrivAer3DModel(cfg).to(device)
     model.vit.rope.set_rope_scale(coef_norm['rope_scale_per_axis'])
     swa_path = osp.join(run_dir, 'swa_model.pt')
-    sd = torch.load(swa_path, map_location=device)
+    sd = torch.load(swa_path, map_location=device, weights_only=False)
     sd_fp = {k: v.to(torch.float32) if v.is_floating_point() else v
              for k, v in sd.items()}
     model.load_state_dict(sd_fp, strict=False)

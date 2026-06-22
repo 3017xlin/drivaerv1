@@ -85,7 +85,7 @@ def stage_a_worker(case_id: int, step1_dir: str, scratch_dir: str,
          'case_max_degree': int}
     """
     step1_pt = torch.load(osp.join(step1_dir, f'run_{case_id}.pt'),
-                          map_location='cpu')
+                          map_location='cpu', weights_only=False)
     vol_pos = step1_pt['volume_coords'].numpy().astype(np.float32)
     vol_vel = step1_pt['volume_velocity'].numpy().astype(np.float32)
     vol_p = step1_pt['volume_pressure'].numpy().astype(np.float32)
@@ -676,7 +676,11 @@ def run_preprocess(step1_dir: str, cache_dir: str, manifest: dict,
             for cid in all_ids
         }
         for fut in tqdm(as_completed(futures), total=len(futures)):
-            summaries.append(fut.result())
+            cid = futures[fut]
+            try:
+                summaries.append(fut.result())
+            except Exception as e:
+                raise RuntimeError(f'Stage A failed on case_id={cid}') from e
     print(f'[Stage A] done in {time.time() - t0:.1f}s', flush=True)
 
     t1 = time.time()

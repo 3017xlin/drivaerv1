@@ -127,7 +127,7 @@ def run_curve(cfg: dict, run_dir: str, delete_checkpoints: bool = False
 
     curve: dict[str, dict[str, float]] = {}
     for ep, ckpt_path in (tqdm(ckpts, desc='curve') if rank == 0 else ckpts):
-        sd = torch.load(ckpt_path, map_location=device)
+        sd = torch.load(ckpt_path, map_location=device, weights_only=False)
         # cast bf16 weights back to fp32 for stable loading
         sd_fp = {k: v.to(torch.float32) if v.is_floating_point() else v
                  for k, v in sd.items()}
