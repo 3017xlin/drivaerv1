@@ -98,6 +98,8 @@ def stage_a_worker(case_id: int, step1_dir: str, scratch_dir: str,
     stl_v = step1_pt['stl_vertices'].numpy().astype(np.float32)
     stl_f = step1_pt['stl_faces'].numpy().astype(np.int32)
     ref = step1_pt['reference']
+    del step1_pt
+
     n_vol_full = vol_pos.shape[0]
     n_surf_full = surf_pos.shape[0]
     n_full = n_vol_full + n_surf_full
@@ -554,15 +556,14 @@ def stage_c_worker(summary: dict[str, Any], coef_norm: dict[str, Any],
             torch.bfloat16)
         pt['point_y_surface'] = torch.from_numpy(point_y_surface).to(
             torch.bfloat16)
-        pt['surface_normals'] = torch.from_numpy(payload['surf_n_ord']
-                                                 ).to(torch.float32)
         pt['surface_areas'] = torch.from_numpy(payload['surf_a_ord']
                                                ).to(torch.float32)
         pt['N_vol_keep'] = int(n_vol_keep)
         pt['N_surf_keep'] = int(n_surf_keep)
         pt['N_keep'] = int(payload['n_keep'])
 
-        # Precompute vol/surf reorder indices from interleaved layout
+        # Derive vol/surf reorder indices locally for baked transient2
+        # (NOT stored in PT — derived on-the-fly at load time)
         _offsets = payload['offsets']
         _lvc = payload['leaf_vol_count']
         is_vol_in_reordered = np.zeros(payload['n_keep'], dtype=bool)
@@ -571,13 +572,10 @@ def stage_c_worker(summary: dict[str, Any], coef_norm: dict[str, Any],
             is_vol_in_reordered[lo:lo + int(_lvc[_l])] = True
         vol_reorder_idx = np.where(is_vol_in_reordered)[0].astype(np.int64)
         surf_reorder_idx = np.where(~is_vol_in_reordered)[0].astype(np.int64)
-        pt['vol_reorder_idx'] = torch.from_numpy(vol_reorder_idx)
-        pt['surf_reorder_idx'] = torch.from_numpy(surf_reorder_idx)
 
         leaf_id_per_point = np.repeat(
             np.arange(L_LEAVES, dtype=np.int32),
             np.diff(_offsets).astype(np.int64))
-        pt['leaf_id_per_point'] = torch.from_numpy(leaf_id_per_point)
 
         # Train_eval and val: bake transient1/2
         if case_id in train_eval_ids or case_id in val_ids:

@@ -1,7 +1,7 @@
 """Streaming test evaluation (v4 §13).
 
-Single GPU (rank 0). For each of 50 test cases:
-  1. load case PT (~7 GB)
+DDP across all ranks. For each rank's shard of 50 test cases:
+  1. load case PT (~7 GB) via DataLoader (num_workers=2, prefetch_factor=1)
   2. encoder + ViT once → (enc_feat, vit_feat) on GPU
   3. decoder chunked over 138M points (4M / chunk → ~35 chunks)
   4. denormalize → metrics → Cd/Cl
@@ -13,15 +13,19 @@ import json
 import math
 import os
 import os.path as osp
+import pickle
 from typing import Any
 
 import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from dataset.loaders import load_coef_norm, load_manifest, load_val_or_test_streaming
+from dataset.loaders import (load_coef_norm, load_manifest,
+                              load_val_or_test_streaming, _TestCaseDataset,
+                              _no_collate)
 from evaluation.denormalize import denormalize_surface, denormalize_volume
 from evaluation.metrics import (cd_cl_from_force, integrate_force,
                                 relative_l2_scalar, relative_l2_vector)
@@ -66,7 +70,7 @@ def _decode_chunk(model: DrivAer3DModel, enc_feat: torch.Tensor,
     idw_idx_p = idw_idx[perm].unsqueeze(0)
     idw_w_p = idw_w[perm].unsqueeze(0).to(torch.bfloat16)
     n_q_vol = int(vol_pos.shape[0])
-    with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+    with torch.amp.autocast('cuda', dtype=torch.bfloat16):
         pred_vol, pred_surf = model.decode_chunk(
             enc_feat, vit_feat, qpos, qsdf, qsdf_g, idw_idx_p, idw_w_p,
             n_q_vol)
@@ -121,7 +125,7 @@ def _eval_one_case(model: DrivAer3DModel, cache_dir: str, case_id: int,
     attn_bias[0, :, :K_local].masked_fill_(invalid_mask, float('-inf'))
     batch['bigbird_attn_bias'] = attn_bias.to(device, non_blocking=True)
 
-    with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+    with torch.amp.autocast('cuda', dtype=torch.bfloat16):
         enc_feat, vit_feat = model.encode(batch)
 
     pred_vol_full_z = torch.zeros(n_vol_full, 8, device='cpu',
@@ -184,18 +188,19 @@ def run_test_eval(cfg: dict, run_dir: str,
                   viz_case_ids: set[int] | None = None) -> dict[str, Any]:
     """Returns per_case_metrics dict (50 entries) for downstream reporting.
 
+    All DDP ranks participate in inference (test cases sharded across GPUs).
     If viz_case_ids is provided, only those cases retain large arrays for
     visualization; otherwise a two-pass approach finds median cases.
     """
     rank = int(os.environ.get('RANK', '0'))
-    if dist.is_initialized() and rank != 0:
-        dist.barrier()
-        return {}
+    world = int(os.environ.get('WORLD_SIZE', '1'))
+    local = int(os.environ.get('LOCAL_RANK', '0'))
 
     cache_dir = cfg['data']['cache_dir']
     manifest = load_manifest(cache_dir)
     coef_norm = load_coef_norm(cache_dir)
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = (torch.device('cuda', local) if torch.cuda.is_available()
+              else torch.device('cpu'))
     model = DrivAer3DModel(cfg).to(device)
     model.vit.rope.set_rope_scale(coef_norm['rope_scale_per_axis'])
     swa_path = osp.join(run_dir, 'swa_model.pt')
@@ -208,41 +213,75 @@ def run_test_eval(cfg: dict, run_dir: str,
     log_vort = bool(cfg['log_training']['vorticity'])
     chunk = int(cfg['evaluation']['test_chunk_size'])
 
-    from concurrent.futures import ThreadPoolExecutor
-
     test_ids = manifest['test_ids']
+    my_test_ids = sorted(test_ids[rank::world])
 
-    per_case: dict[int, dict[str, Any]] = {}
-    prefetch_pool = ThreadPoolExecutor(max_workers=1)
-    next_future = prefetch_pool.submit(
-        load_val_or_test_streaming, cache_dir, test_ids[0], True)
-    for i, cid in enumerate(tqdm(test_ids, desc='test eval (pass 1)')):
-        pt_cur = next_future.result()
-        if i + 1 < len(test_ids):
-            next_future = prefetch_pool.submit(
-                load_val_or_test_streaming, cache_dir, test_ids[i + 1], True)
-        per_case[cid] = _eval_one_case(model, cache_dir, cid, coef_norm,
-                                       device, chunk, log_nut, log_vort,
-                                       keep_arrays=False, pt=pt_cur)
-        del pt_cur
-        torch.cuda.empty_cache()
+    ds = _TestCaseDataset(cache_dir, my_test_ids)
+    dl = DataLoader(ds, batch_size=1, shuffle=False,
+                    num_workers=min(2, len(my_test_ids)),
+                    prefetch_factor=1, collate_fn=_no_collate,
+                    persistent_workers=False, pin_memory=False)
 
-    if viz_case_ids is None:
-        from evaluation.viz import _median_case
-        vol_median = _median_case(per_case,
-                                  ['p_v', 'u_x', 'u_y', 'u_z', 'omega'])
-        surf_median = _median_case(per_case,
-                                   ['p_s', 'tau_x', 'tau_y', 'tau_z'])
-        viz_case_ids = {vol_median, surf_median}
+    my_per_case: dict[int, dict[str, Any]] = {}
+    it = dl
+    if rank == 0:
+        it = tqdm(dl, total=len(my_test_ids), desc='test eval (pass 1)')
+    for batch in it:
+        for cid, pt_cur in batch:
+            my_per_case[cid] = _eval_one_case(
+                model, cache_dir, cid, coef_norm, device, chunk,
+                log_nut, log_vort, keep_arrays=False, pt=pt_cur)
+            del pt_cur
+            torch.cuda.empty_cache()
 
-    for cid in tqdm(list(viz_case_ids), desc='test eval (pass 2: viz)'):
-        per_case[cid] = _eval_one_case(model, cache_dir, cid, coef_norm,
-                                       device, chunk, log_nut, log_vort,
-                                       keep_arrays=True)
-        torch.cuda.empty_cache()
+    # All-gather scalar metrics to rank 0
+    per_case = _allgather_metrics(my_per_case, rank, world, device)
 
-    prefetch_pool.shutdown(wait=False)
+    if rank == 0:
+        if viz_case_ids is None:
+            from evaluation.viz import _median_case
+            vol_median = _median_case(per_case,
+                                      ['p_v', 'u_x', 'u_y', 'u_z', 'omega'])
+            surf_median = _median_case(per_case,
+                                       ['p_s', 'tau_x', 'tau_y', 'tau_z'])
+            viz_case_ids = {vol_median, surf_median}
+
+        for cid in tqdm(list(viz_case_ids), desc='test eval (pass 2: viz)'):
+            per_case[cid] = _eval_one_case(model, cache_dir, cid, coef_norm,
+                                           device, chunk, log_nut, log_vort,
+                                           keep_arrays=True)
+            torch.cuda.empty_cache()
 
     if dist.is_initialized():
         dist.barrier()
-    return per_case
+    return per_case if rank == 0 else {}
+
+
+def _allgather_metrics(local_metrics: dict[int, dict[str, Any]],
+                       rank: int, world: int,
+                       device: torch.device) -> dict[int, dict[str, Any]]:
+    """Gather scalar per-case metrics from all ranks to rank 0."""
+    if world <= 1 or not dist.is_initialized():
+        return local_metrics
+    serializable = {}
+    for cid, m in local_metrics.items():
+        serializable[cid] = {k: v for k, v in m.items()
+                             if not k.startswith('_')}
+    data = pickle.dumps(serializable)
+    size_t = torch.tensor([len(data)], dtype=torch.long, device=device)
+    sizes = [torch.zeros(1, dtype=torch.long, device=device)
+             for _ in range(world)]
+    dist.all_gather(sizes, size_t)
+    max_size = max(s.item() for s in sizes)
+    buf = torch.zeros(max_size, dtype=torch.uint8, device=device)
+    buf[:len(data)] = torch.frombuffer(bytearray(data), dtype=torch.uint8).to(device)
+    all_bufs = [torch.zeros(max_size, dtype=torch.uint8, device=device)
+                for _ in range(world)]
+    dist.all_gather(all_bufs, buf)
+    merged: dict[int, dict[str, Any]] = {}
+    for i in range(world):
+        sz = int(sizes[i].item())
+        remote_data = bytes(all_bufs[i][:sz].cpu().numpy().tobytes())
+        remote_metrics = pickle.loads(remote_data)
+        merged.update(remote_metrics)
+    return merged

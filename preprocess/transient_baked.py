@@ -70,7 +70,8 @@ def bake_transient2(rng: np.random.Generator,
     """Return baked transient2 fields."""
     n_vol_keep = vol_reorder_idx.shape[0]
     n_surf_keep = surf_reorder_idx.shape[0]
-    n_query_surf = n_query - n_query_vol
+    n_query_vol = min(n_query_vol, n_vol_keep)
+    n_query_surf = min(n_query - n_query_vol, n_surf_keep)
     vol_choice = rng.choice(n_vol_keep, size=n_query_vol, replace=False)
     if surface_area_alpha == 0.0:
         surf_choice = rng.choice(n_surf_keep, size=n_query_surf, replace=False)
