@@ -27,7 +27,8 @@ def load_manifest(cache_dir: str) -> dict[str, list[int]]:
 
 
 def load_coef_norm(cache_dir: str) -> dict[str, Any]:
-    return torch.load(osp.join(cache_dir, 'coef_norm.pt'), map_location='cpu')
+    return torch.load(osp.join(cache_dir, 'coef_norm.pt'), map_location='cpu',
+                      weights_only=False)
 
 
 def _derive_leaf_id_per_point(offsets: torch.Tensor) -> torch.Tensor:
@@ -60,14 +61,14 @@ def load_one_case(cache_dir: str, case_id: int,
     under keys ``nut_log_zscored`` / ``vort_log_zscored`` if loaded.
     """
     main = torch.load(osp.join(cache_dir, f'case_{case_id}.pt'),
-                      map_location='cpu')
+                      map_location='cpu', weights_only=False)
     main = _pin_dict(main)
     # Derive leaf_id_per_point
     main['leaf_id_per_point'] = _derive_leaf_id_per_point(
         main['leaf_member_offsets']).pin_memory()
     if with_log_sidecar[0] or with_log_sidecar[1]:
         side = torch.load(osp.join(cache_dir, f'case_{case_id}_log.pt'),
-                          map_location='cpu')
+                          map_location='cpu', weights_only=False)
         if with_log_sidecar[0]:
             main['nut_log_zscored'] = side['nut_log_zscored'].pin_memory()
         if with_log_sidecar[1]:
@@ -100,4 +101,4 @@ def load_val_or_test_streaming(cache_dir: str, case_id: int,
     """Single-shot load (NOT pinned) for streaming pipeline (curve / test)."""
     sub = 'test/' if is_test else ''
     return torch.load(osp.join(cache_dir, sub, f'case_{case_id}.pt'),
-                      map_location='cpu')
+                      map_location='cpu', weights_only=False)
