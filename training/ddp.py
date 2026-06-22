@@ -14,7 +14,8 @@ def init_ddp() -> tuple[int, int, int]:
     Falls back to single-process (rank=0, world=1) if env vars absent.
     """
     if 'WORLD_SIZE' in os.environ and int(os.environ['WORLD_SIZE']) > 1:
-        dist.init_process_group(backend='nccl')
+        if not dist.is_initialized():
+            dist.init_process_group(backend='nccl')
         rank = dist.get_rank()
         world = dist.get_world_size()
         local = int(os.environ.get('LOCAL_RANK', rank))

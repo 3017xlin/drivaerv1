@@ -103,15 +103,27 @@ def run_curve(cfg: dict, run_dir: str, delete_checkpoints: bool = False,
     val_ids = manifest['val_ids']
     case_ids = train_eval_ids + val_ids
     n_workers = int(cfg['training']['num_workers'])
+
+    # DDP shard the 68 case_ids first, then load what this rank needs
+    my_shard = case_ids[rank::world]
+    te_set = set(train_eval_ids)
+    val_set = set(val_ids)
+    my_te_needed = [c for c in my_shard if c in te_set]
+    my_val_needed = [c for c in my_shard if c in val_set]
+
     if retained_pt is not None:
-        all_pt = dict(retained_pt)
-        my_val_ids = sorted(val_ids[rank::world])
-        val_pt = load_cases_dataloader(cache_dir, my_val_ids,
-                                       num_workers=n_workers, rank=rank)
-        all_pt.update(val_pt)
-        del val_pt
+        all_pt: dict[int, dict] = {c: retained_pt[c]
+                                   for c in my_te_needed if c in retained_pt}
+        my_te_missing = [c for c in my_te_needed if c not in retained_pt]
+        if my_te_missing:
+            all_pt.update(load_cases_dataloader(cache_dir, my_te_missing,
+                                                num_workers=n_workers,
+                                                rank=rank))
+        all_pt.update(load_cases_dataloader(cache_dir, my_val_needed,
+                                            num_workers=n_workers, rank=rank))
     else:
-        all_pt = load_cases_pinned(cache_dir, case_ids,
+        needed = my_te_needed + my_val_needed
+        all_pt = load_cases_pinned(cache_dir, needed,
                                    num_workers=n_workers,
                                    with_log_sidecar=(False, False), rank=rank)
 
@@ -126,11 +138,8 @@ def run_curve(cfg: dict, run_dir: str, delete_checkpoints: bool = False,
     log_vort = bool(cfg['log_training']['vorticity'])
     B = int(cfg['evaluation']['curve_batch_size'])
 
-    # DDP shard 68 case ids across ranks
-    my_shard = case_ids[rank::world]
-    my_pts = [all_pt[cid] for cid in my_shard]
-    my_te_pts = [all_pt[cid] for cid in my_shard if cid in train_eval_ids]
-    my_val_pts = [all_pt[cid] for cid in my_shard if cid in val_ids]
+    my_te_pts = [all_pt[cid] for cid in my_te_needed]
+    my_val_pts = [all_pt[cid] for cid in my_val_needed]
 
     curve: dict[str, dict[str, float]] = {}
     for ep, ckpt_path in (tqdm(ckpts, desc='curve') if rank == 0 else ckpts):
